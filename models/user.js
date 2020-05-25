@@ -38,6 +38,7 @@ const schema = new mongoose.Schema({
     minlength: 3
   },
   posts: [ { type: mongoose.Schema.Types.ObjectId, ref: 'Post' } ],
+  messages: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Message' }],
   likes: [ { type: mongoose.Schema.Types.ObjectId, ref: 'Like' } ],
   profilePicture: { type: mongoose.Schema.Types.ObjectId, ref: 'ProfilePicture' }
 })

@@ -1,10 +1,14 @@
 const { ApolloServer, UserInputError,makeExecutableSchema, gql, GraphQLUpload } = require('apollo-server-express')
 const {GraphQLScalarType} = require("graphql")
+const { PubSub } = require('apollo-server')
+const pubsub = new PubSub()
 const mongoose = require("mongoose")
 require('dotenv').config()
+const {createServer} =  require('http');
 const User = require("./models/user")
 const Post = require("./models/post")
 const Comment = require("./models/comment")
+const Message = require("./models/message")
 const ProfilePicture = require("./models/profilePicture")
 const Image = require("./models/image")
 const Like = require("./models/like")
@@ -69,6 +73,7 @@ const typeDefs = gql`
     city: String!
     posts: [Post]
     likes: [Like]
+    messages: [Message]
     profilePicture: File
   }
 
@@ -83,6 +88,13 @@ const typeDefs = gql`
     user: User
     comments: [Comment]
     image: File
+  }
+
+  type Message {
+    id: ID!
+    message: String!
+    date: String!
+    user: User
   }
 
   type Comment {
@@ -113,9 +125,15 @@ const typeDefs = gql`
     findPost(post: String): Post
     allPosts: [Post!]!
     allComments(post: String): [Comment!]!
+    allMessages: [Message!]!
     me: User
     profilePictures: [File]
     files: [String]
+  }
+
+  type Subscription {
+    postAdded: Post!
+    messageAdded: Message!
   }
 
   type Mutation {
@@ -124,6 +142,9 @@ const typeDefs = gql`
       content: String!
       file: Upload
     ): Post
+    addMessage(
+      message: String!
+    ): Message
     addComment(
       content: String!
       post: String!
@@ -191,6 +212,9 @@ const resolvers = {
       console.log("Comments", Comment.find({}))
       return await Comment.find({})
     },
+    allMessages: async (root, args) => {
+      return await Message.find({}).populate("user")
+    },
     me: (root, args, context) => context.currentUser,
     profilePictures: (root, args, context) => ProfilePicture.find({}).populate("user"),
     files: (root, args, context) => files
@@ -199,7 +223,8 @@ const resolvers = {
   User: {
     posts: (root) => Post.find({user: root.id}),
     likes: (root) => Like.find({user: root.id}),
-    profilePicture: (root) => ProfilePicture.findOne({user: root.id})
+    profilePicture: (root) => ProfilePicture.findOne({user: root.id}),
+    messages: (root) => Message.find({user: root.id})
   },
   Post: {
     user: (root) => {
@@ -231,7 +256,46 @@ const resolvers = {
       return Post.findById(root.post)
     },
   },
+  Message: {
+    user: (root) => {
+      return User.findById(root.user)
+    }
+  },
   Mutation: {
+    addMessage: async (root, args, context) => {
+      const currentUser = context.currentUser
+
+      if (!currentUser) {
+        throw new AuthenticationError("not authenticated")
+      }
+
+      if (!args.message) {
+        throw new UserInputError("Cannot send empty message")
+      }
+
+      const newMessage = new Message({
+        message: args.message,
+        date: currentTime().date,
+        user: currentUser._id
+      })
+
+      console.log("CUrentt user adding message", currentUser)
+      console.log("New message", newMessage)
+
+      try {
+        await newMessage.save()
+        currentUser.messages = currentUser.messages.concat(newMessage._id)
+        await currentUser.save()
+      } catch (error) {
+          throw new UserInputError(error.message, {
+            invalidArgs: args,
+          })
+      }
+
+      pubsub.publish("MESSAGE_ADDED", { messageAdded: newMessage })
+
+      return newMessage
+    },
     singleUpload: async (_, { file }, context) => {
       const currentUser = context.currentUser
       console.log(currentUser)
@@ -356,6 +420,8 @@ const resolvers = {
             invalidArgs: args,
           })
       }
+
+      pubsub.publish("POST_ADDED", { postAdded: post })
 
       return post
     },
@@ -573,7 +639,15 @@ const resolvers = {
 
       return {  value: jwt.sign(userForToken, JWT_SECRET) }
     }
-  }
+  },
+  Subscription: {
+    postAdded: {
+      subscribe: () => pubsub.asyncIterator(['POST_ADDED'])
+    },
+    messageAdded: {
+      subscribe: () => pubsub.asyncIterator(['MESSAGE_ADDED'])
+    }
+  },
 }
 
 const schema = makeExecutableSchema({typeDefs, resolvers})
@@ -593,10 +667,16 @@ const server = new ApolloServer({
   }
 })
 
+const PORT = process.env.PORT || 4000
+
 const app = express()
 app.use("/images", express.static(path.join(__dirname, "./images")))
 server.applyMiddleware({app})
 
-app.listen(4000, () => {
-  console.log(`Server ready at 4000`)
+const httpServer = createServer(app)
+server.installSubscriptionHandlers(httpServer);
+
+httpServer.listen({port: PORT}, () => {
+  console.log(`🚀 Server ready at http://localhost:${PORT}${server.graphqlPath}`)
+  console.log(`🚀 Subscriptions ready at ws://localhost:${PORT}${server.subscriptionsPath}`)
 })
